@@ -1,22 +1,32 @@
 #include <iostream>
-#include <random>
-#include <thread>
-#include <chrono>
-#include <mutex>
-#include <vector>
 #include <cassert>
+#include <vector>
+#include <chrono>
+#include <random>
+#include <ranges>
+
+#include <thread>
+#include <future>
+#include <mutex>
+#include <execution>
 
 // CountPointVariables //
-static int in{};
-static int total{};
-static std::mutex mutex{};
-static std::atomic<int> inAtomic{};
-static std::atomic<int> totalAtomic{};
+static int s_In{};
+static int s_Total{};
+static std::mutex s_Mutex{};
+static std::atomic<int> s_InAtomic{};
+static std::atomic<int> s_TotalAtomic{};
 
 // Other Variables //
 static const unsigned int s_NrThreads{ std::thread::hardware_concurrency() };
-static constexpr unsigned int s_NrSamples{ 100'000'000 };
+static constexpr unsigned int s_NrSamples{ 1'000'000 };
 static constexpr unsigned int s_NrMeasurements{ 10 };
+static const unsigned int s_PointsPerThread{ s_NrSamples / s_NrThreads };
+
+// Time
+static std::chrono::high_resolution_clock::time_point s_MeasureStart{};
+static std::chrono::high_resolution_clock::time_point s_MeasureEnd{};
+static std::chrono::duration<double, std::milli> s_MeasureDiff{};
 
 struct Vector2f
 {
@@ -33,6 +43,7 @@ struct MeasureData
 class MeasureHelper final
 {
 public:
+
     MeasureHelper(unsigned int capacity)
     {
         m_Data.reserve(capacity);
@@ -42,27 +53,23 @@ public:
     MeasureData GetAverageMeasure()
     {
         // Check
-        if (m_Data.size() < 2)
+        if (m_Data.size() < 3)
         {
             assert(false);
             return MeasureData{};
         }
 
-        // Get Max and Min value
-        auto minmax = std::minmax_element(m_Data.begin(), m_Data.end(),
+        // Sort the data
+        std::ranges::sort(m_Data,
             [](const MeasureData& dataA, const MeasureData& dataB)
             {
                 return dataA.time < dataB.time;
             }
         );
 
-        // Remove Max and Min value
-        m_Data.erase(std::remove_if(m_Data.begin(), m_Data.end(), 
-            [&](const MeasureData& data)
-            {
-               return data.time == minmax.first->time || data.time == minmax.second->time;
-            }
-        ), m_Data.end());
+        // Remove last and first element (min and max)
+        m_Data.erase(m_Data.begin());
+        m_Data.erase(m_Data.end() - 1);
 
         // Get Average
         unsigned int sumTime{};
@@ -74,6 +81,13 @@ public:
             sumResult += data.result;
             ++count;
         }
+
+        if (m_Data.empty())
+        {
+            int i{};
+            ++i;
+        }
+
         const unsigned int averageTime{ sumTime / count };
         const float averageResult{ sumResult / count };
 
@@ -104,10 +118,10 @@ void CountPoints(int number)
         const Vector2f point{ GetRandomPoint() };
         if (point.x * point.x + point.y * point.y < 1.f)
         {
-            ++in;
+            ++s_In;
         }
     }
-    total += number;
+    s_Total += number;
 }
 
 void CountPointsMutex(int number)
@@ -122,22 +136,69 @@ void CountPointsMutex(int number)
         }
     }
 
-    std::lock_guard<std::mutex> lock(mutex);
-    in += localIn;
-    total += number;
+    std::lock_guard<std::mutex> lock(s_Mutex);
+    s_In += localIn;
+    s_Total += number;
 }
 
 void CountPointsAtomic(int number)
 {
+    int localIn{};
     for (int idx{}; idx < number; ++idx)
     {
         const Vector2f point{ GetRandomPoint() };
         if (point.x * point.x + point.y * point.y < 1.f)
         {
-            ++inAtomic;
+            ++localIn;
         }
     }
-    totalAtomic += number;
+    s_InAtomic += localIn;
+    s_TotalAtomic += number;
+}
+
+void CountPointsPromise(int number, std::promise<int>* promise)
+{
+    int localIn{};
+    for (int idx{}; idx < number; ++idx)
+    {
+        const Vector2f point{ GetRandomPoint() };
+        if (point.x * point.x + point.y * point.y < 1.f)
+        {
+            ++localIn;
+        }
+    }
+    promise->set_value(localIn);
+}
+
+int CountPointsAsync(int number)
+{
+    int localIn{};
+    for (int idx{}; idx < number; ++idx)
+    {
+        const Vector2f point{ GetRandomPoint() };
+        if (point.x * point.x + point.y * point.y < 1.f)
+        {
+            ++localIn;
+        }
+    }
+    return localIn;
+}
+
+void CountPointsSTL(int number)
+{
+    int localIn{};
+    for (int idx{}; idx < number; ++idx)
+    {
+        const Vector2f point{ GetRandomPoint() };
+        if (point.x * point.x + point.y * point.y < 1.f)
+        {
+            ++localIn;
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(s_Mutex);
+    s_In += localIn;
+    s_Total += number;
 }
 
 void PrintTime(const std::string& version, int milisec, float result)
@@ -150,22 +211,18 @@ void RunOriginalVersion()
 {
     MeasureHelper helper{ s_NrMeasurements };
 
-    std::chrono::high_resolution_clock::time_point start{};
-    std::chrono::high_resolution_clock::time_point end{};
-    std::chrono::duration<double, std::milli> diff{};
-
-    in = 0;
-    total = 0;
-
     for (unsigned int measureNr{}; measureNr < s_NrMeasurements; ++measureNr)
     {
-        start = std::chrono::high_resolution_clock::now();
+        s_In = 0;
+        s_Total = 0;
+
+        s_MeasureStart = std::chrono::high_resolution_clock::now();
+
         CountPoints(s_NrSamples);
-        end = std::chrono::high_resolution_clock::now();
-        diff = end - start;
-        helper.AddData(MeasureData{static_cast<unsigned int>(diff.count()), 4.f * in / total });
-        in = 0;
-        total = 0;
+
+        s_MeasureEnd = std::chrono::high_resolution_clock::now();
+        s_MeasureDiff = s_MeasureEnd - s_MeasureStart;
+        helper.AddData(MeasureData{static_cast<unsigned int>(s_MeasureDiff.count()), 4.f * s_In / s_Total });
     }
 
     MeasureData measuredData{ helper.GetAverageMeasure() };
@@ -174,35 +231,31 @@ void RunOriginalVersion()
 
 void RunMutexVersion()
 {
-    const unsigned int pointsPerThread{ s_NrSamples / s_NrThreads };
     MeasureHelper helper{ s_NrMeasurements };
 
     std::vector<std::jthread> threads{};
-    std::chrono::high_resolution_clock::time_point start{};
-    std::chrono::high_resolution_clock::time_point end{};
-    std::chrono::duration<double, std::milli> diff{};
-
-    in = 0;
-    total = 0;
 
     for (unsigned int measureNr{}; measureNr < s_NrMeasurements; ++measureNr)
     {
+        s_In = 0;
+        s_Total = 0;
         threads.clear();
         threads.resize(s_NrThreads);
-        start = std::chrono::high_resolution_clock::now();
+
+        s_MeasureStart = std::chrono::high_resolution_clock::now();
+
         for (auto& thread : threads)
         {
-            thread = std::jthread(CountPointsMutex, pointsPerThread);
+            thread = std::jthread(CountPointsMutex, s_PointsPerThread);
         }
         for (auto& thread : threads)
         {
             thread.join();
         }
-        end = std::chrono::high_resolution_clock::now();
-        diff = end - start;
-        helper.AddData(MeasureData{ static_cast<unsigned int>(diff.count()), 4.f * in / total });
-        in = 0;
-        total = 0;
+
+        s_MeasureEnd = std::chrono::high_resolution_clock::now();
+        s_MeasureDiff = s_MeasureEnd - s_MeasureStart;
+        helper.AddData(MeasureData{ static_cast<unsigned int>(s_MeasureDiff.count()), 4.f * s_In / s_Total });
     }
 
     MeasureData measuredData{ helper.GetAverageMeasure() };
@@ -211,29 +264,137 @@ void RunMutexVersion()
 
 void RunAtomicVersion()
 {
-    const unsigned int pointsPerThread{ s_NrSamples / s_NrThreads };
+    MeasureHelper helper{ s_NrMeasurements };
 
     std::vector<std::jthread> threads{};
-    std::chrono::high_resolution_clock::time_point start{};
-    std::chrono::high_resolution_clock::time_point end{};
-    std::chrono::duration<double, std::milli> diff{};
 
-    threads.clear();
-    threads.resize(s_NrThreads);
-    start = std::chrono::high_resolution_clock::now();
-    for (auto& thread : threads)
+    for (unsigned int measureNr{}; measureNr < s_NrMeasurements; ++measureNr)
     {
-        thread = std::jthread(CountPointsAtomic, pointsPerThread);
+        s_InAtomic = 0;
+        s_TotalAtomic = 0;
+        threads.clear();
+        threads.resize(s_NrThreads);
+
+        s_MeasureStart = std::chrono::high_resolution_clock::now();
+
+        for (auto& thread : threads)
+        {
+            thread = std::jthread(CountPointsAtomic, s_PointsPerThread);
+        }
+        for (auto& thread : threads)
+        {
+            thread.join();
+        }
+
+        s_MeasureEnd = std::chrono::high_resolution_clock::now();
+        s_MeasureDiff = s_MeasureEnd - s_MeasureStart;
+        helper.AddData(MeasureData{ static_cast<unsigned int>(s_MeasureDiff.count()), 4.f * s_InAtomic / s_TotalAtomic });
     }
-    for (auto& thread : threads)
+    MeasureData measuredData{ helper.GetAverageMeasure() };
+    PrintTime("Atomic", measuredData.time, measuredData.result);
+}
+
+void RunPromiseVersion()
+{
+    MeasureHelper helper{ s_NrMeasurements };
+
+    std::vector<std::jthread> threads{};
+    std::vector<std::promise<int>> inPromises{};
+
+    for (unsigned int measureNr{}; measureNr < s_NrMeasurements; ++measureNr)
     {
-        thread.join();
+        s_In = 0;
+        s_Total = 0;
+        threads.clear();
+        threads.resize(s_NrThreads);
+        inPromises.clear();
+        inPromises.resize(s_NrThreads);
+
+        s_MeasureStart = std::chrono::high_resolution_clock::now();
+
+        for (unsigned int threadIdx{}; threadIdx < s_NrThreads; ++threadIdx)
+        {
+            threads[threadIdx] = std::jthread(CountPointsPromise, s_PointsPerThread, &inPromises[threadIdx]);
+        }
+        for (unsigned int threadIdx{}; threadIdx < s_NrThreads; ++threadIdx)
+        {
+            threads[threadIdx].join();
+
+            s_In += inPromises[threadIdx].get_future().get();
+            s_Total += s_PointsPerThread;
+        }
+        
+        s_MeasureEnd = std::chrono::high_resolution_clock::now();
+        s_MeasureDiff = s_MeasureEnd - s_MeasureStart;
+        helper.AddData(MeasureData{ static_cast<unsigned int>(s_MeasureDiff.count()), 4.f * s_In / s_Total });
     }
-    end = std::chrono::high_resolution_clock::now();
-    diff = end - start;
-    PrintTime("Atomic", static_cast<int>(diff.count()), 4.f * inAtomic / totalAtomic);
-    inAtomic = 0;
-    totalAtomic = 0;
+
+    MeasureData measuredData{ helper.GetAverageMeasure() };
+    PrintTime("Promise", measuredData.time, measuredData.result);
+}
+
+void RunAsyncVersion()
+{
+    MeasureHelper helper{ s_NrMeasurements };
+
+    std::vector<std::future<int>> futures{};
+
+    for (unsigned int measureNr{}; measureNr < s_NrMeasurements; ++measureNr)
+    {
+        s_In = 0;
+        s_Total = 0;
+        futures.clear();
+        futures.resize(s_NrThreads);
+
+        s_MeasureStart = std::chrono::high_resolution_clock::now();
+
+        for (unsigned int threadIdx{}; threadIdx < s_NrThreads; ++threadIdx)
+        {
+            futures[threadIdx] = std::async(std::launch::async, CountPointsAsync, s_PointsPerThread);
+        }
+        for (unsigned int threadIdx{}; threadIdx < s_NrThreads; ++threadIdx)
+        {
+            s_In += futures[threadIdx].get();
+            s_Total += s_PointsPerThread;
+        }
+
+        s_MeasureEnd = std::chrono::high_resolution_clock::now();
+        s_MeasureDiff = s_MeasureEnd - s_MeasureStart;
+        helper.AddData(MeasureData{ static_cast<unsigned int>(s_MeasureDiff.count()), 4.f * s_In / s_Total });
+    }
+
+    MeasureData measuredData{ helper.GetAverageMeasure() };
+    PrintTime("Async", measuredData.time, measuredData.result);
+}
+
+template<typename ExecPolicy>
+void RunSTLVersion(ExecPolicy policy, const std::string& version)
+{
+    MeasureHelper helper{ s_NrMeasurements };
+
+    std::vector<int> numbers( static_cast<int>(s_NrThreads), static_cast<int>(s_PointsPerThread) );
+
+    for (unsigned int measureNr{}; measureNr < s_NrMeasurements; ++measureNr)
+    {
+        s_In = 0;
+        s_Total = 0;
+
+        s_MeasureStart = std::chrono::high_resolution_clock::now();
+
+        std::for_each(policy, numbers.begin(), numbers.end(),
+            [](int number)
+            {
+                CountPointsSTL(number);
+            }
+        );
+
+        s_MeasureEnd = std::chrono::high_resolution_clock::now();
+        s_MeasureDiff = s_MeasureEnd - s_MeasureStart;
+        helper.AddData(MeasureData{ static_cast<unsigned int>(s_MeasureDiff.count()), 4.f * s_In / s_Total });
+    }
+
+    MeasureData measuredData{ helper.GetAverageMeasure() };
+    PrintTime(version, measuredData.time, measuredData.result);
 }
 
 int main()
@@ -243,6 +404,8 @@ int main()
     std::cout << "# samples: " << s_NrSamples << "\n";
     std::cout << "# measurements: " << s_NrMeasurements << "\n";
     std::cout << "\n";
+
+    const std::chrono::high_resolution_clock::time_point start{ std::chrono::high_resolution_clock::now() };
 
     // Original Version //
     RunOriginalVersion();
@@ -254,7 +417,27 @@ int main()
     RunAtomicVersion();
 
     // Promise - Future Version //
+    RunPromiseVersion();
 
+    // Async Version //
+    RunAsyncVersion();
+
+    // STL seq Version //
+    RunSTLVersion(std::execution::seq, "STL seq");
+
+    // STL par Version //
+    RunSTLVersion(std::execution::par, "STL par");
+
+    // STL par_unseq Version //
+    RunSTLVersion(std::execution::par_unseq, "STL par_unseq");
+
+    // STL unseq Version //
+    RunSTLVersion(std::execution::unseq, "STL unseq");
+
+    const std::chrono::high_resolution_clock::time_point end{ std::chrono::high_resolution_clock::now() };
+    const std::chrono::duration<double> diff{ end - start };
+
+    std::cout << "Total operational time: " << diff.count() << " sec\n";
 
     return 0;
 }
