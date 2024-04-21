@@ -222,7 +222,7 @@ void RunOriginalVersion()
 
         s_MeasureEnd = std::chrono::high_resolution_clock::now();
         s_MeasureDiff = s_MeasureEnd - s_MeasureStart;
-        helper.AddData(MeasureData{static_cast<unsigned int>(s_MeasureDiff.count()), 4.f * s_In / s_Total });
+        helper.AddData(MeasureData{ static_cast<unsigned int>(s_MeasureDiff.count()), 4.f * s_In / s_Total });
     }
 
     MeasureData measuredData{ helper.GetAverageMeasure() };
