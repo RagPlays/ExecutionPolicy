@@ -19,7 +19,7 @@ static std::atomic<int> s_TotalAtomic{};
 
 // Other Variables //
 static const unsigned int s_NrThreads{ std::thread::hardware_concurrency() };
-static constexpr unsigned int s_NrSamples{ 1'000'000 };
+static constexpr unsigned int s_NrSamples{ 100'000'000 };
 static constexpr unsigned int s_NrMeasurements{ 10 };
 static const unsigned int s_PointsPerThread{ s_NrSamples / s_NrThreads };
 
